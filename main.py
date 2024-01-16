@@ -193,7 +193,7 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
 
 @client.event
 async def on_ready():
-    await client.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="the server grow"))
+    await client.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="for plant"))
     await tree.sync(guild=DEF_GUILD)
     print("Ready!")
 
