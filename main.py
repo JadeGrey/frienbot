@@ -3,10 +3,12 @@ from discord import app_commands, Interaction, Member, RawReactionActionEvent
 from typing import Literal
 from dotenv import load_dotenv
 
+# Constants and Env
 load_dotenv()
 TOKEN = os.getenv('TOKEN')
 DEF_GUILD = discord.Object(id=1193767905049981069)
 
+# Discord app_commands and client Init
 intents = discord.Intents.all()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
