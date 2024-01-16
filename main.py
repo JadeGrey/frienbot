@@ -2,7 +2,6 @@ import discord, json
 from discord import app_commands, Interaction, Member, RawReactionActionEvent
 from typing import Literal
 
-TOKEN = 'MTE5Mzc3MzIyNjgzMzIzNjAxOQ.GQBTFt.BSig6FmUiRrd7efk3XRzlDDAFQM_HNGhmvo3yQ'
 DEF_GUILD = discord.Object(id=1193767905049981069)
 
 intents = discord.Intents.all()
