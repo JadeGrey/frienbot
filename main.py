@@ -1,18 +1,228 @@
-import discord, json, os
-from discord import app_commands, Interaction, Member, RawReactionActionEvent
-from typing import Literal
+import discord, json, os, shutil, asyncio, youtubesearchpython.__future__, youtubesearchpython
+from pytube import YouTube
+from discord import app_commands, Interaction, Member, RawReactionActionEvent, VoiceClient, VoiceState
+from typing import Literal, Union
 from dotenv import load_dotenv
-
-# Constants and Env
-load_dotenv()
-TOKEN = os.getenv('TOKEN')
-DEF_GUILD = discord.Object(id=1193767905049981069)
 
 # Discord app_commands and client Init
 intents = discord.Intents.all()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
+# Constants, init vars, and Env
+load_dotenv()
+TOKEN = os.getenv('TOKEN')
+AUDIO_FOLDER = os.getenv('AUDIO_FOLDER')
+GUILD_ID = int(os.getenv('GUILD_ID'))
+DEF_GUILD = discord.Object(id=GUILD_ID)
+
+queue = []
+vc = None
+song_is_active = False
+song_is_paused = False
+
+# Pre load actions
+if __name__ == '__main__':
+
+    # Credit to Nick Stinemates [https://stackoverflow.com/a/185941]
+    
+    for filename in os.listdir(AUDIO_FOLDER):
+        file_path = os.path.join(AUDIO_FOLDER, filename)
+        try:
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
+        except Exception as e:
+            print('Failed to delete %s. Reason: %s' % (file_path, e))
+
+async def queue_handler(interaction: discord.Interaction, action: Literal['Play', 'Skip', 'Pause', 'Resume', 'Stop'], queue: list = queue):
+
+    global song_is_active
+    global song_is_paused
+    global vc
+
+    user = interaction.user
+    voice_channel = interaction.user.voice.channel
+    text_channel = interaction.channel
+    song_name = queue[0]['song_name']
+    song_link = queue[0]['song_link']
+
+    match action:
+
+        case 'Play':
+
+            await music_status_channel.edit(name=song_name)
+
+            yt = YouTube(song_link)
+            audio = yt.streams.filter(only_audio = True).first().download(output_path='./music')
+
+            if vc == None:
+                vc = await voice_channel.connect()
+
+            if not vc.is_connected():
+                vc = await voice_channel.connect()
+            
+            vc.play(discord.FFmpegPCMAudio(executable='C:/ffmpeg/bin/ffmpeg.exe', source=audio))
+
+            await text_channel.send(f'Loaded [{song_name}](<{song_link}>)')
+            song_is_active = True
+            
+
+            while song_is_active and vc.is_playing() or song_is_paused:
+                await asyncio.sleep(1)
+
+            vc.stop()
+            queue.pop(0)
+
+            while True:
+                try:
+                    os.remove(audio)
+                    break
+                except:
+                    await asyncio.sleep(1)
+
+            if queue == []:
+                await vc.disconnect()
+                vc = None
+                await music_status_channel.edit(name='No songs playing')
+                
+            song_is_active = False
+
+            
+        case 'Pause':
+
+            if not song_is_active:
+                await interaction.response.send_message('There is no song playing!', ephemeral=True)
+                return
+            
+            if song_is_paused:
+                await interaction.response.send_message('The song is already paused!', ephemeral=True)
+                return
+
+            if type(vc) != VoiceClient:
+                await interaction.response.send_message('Error handling queue, please let Jade know!')
+                return
+            
+            vc.pause()
+            song_is_paused = True
+
+            await interaction.response.send_message(f'Paused [{song_name}](<{song_link}>)!')
+
+        case 'Skip':
+            
+            if not song_is_active:
+                await interaction.response.send_message('There is no song playing!', ephemeral=True)
+                return
+            
+            song_is_paused = False
+            song_is_active = False
+
+            await interaction.response.send_message(f'Skipped [{song_name}](<{song_link}>)!')
+
+        case 'Resume':
+
+            if not song_is_active:
+                await interaction.response.send_message('There is no song playing!', ephemeral=True)
+                return
+            
+            if not song_is_paused:
+                await interaction.response.send_message('The song is already playing!', ephemeral=True)
+                return
+            
+            if type(vc) != VoiceClient:
+                await interaction.response.send_message('Error handling queue, please let Jade know!')
+                return
+            
+            vc.resume()
+            song_is_paused = False
+
+            await interaction.response.send_message(f'Resumed [{song_name}](<{song_link}>)')
+
+        case 'Stop':
+
+            if not song_is_active:
+                await interaction.response.send_message('There is no song playing!', ephemeral=True)
+                return
+            
+            queue = []
+            song_is_paused = False
+            song_is_active = False
+
+            await interaction.response.send_message(f'Stopped playback and cleared queue!')
+
+@tree.command(name='play', description='Part of the sounds pack, searches for music on YouTube.', guild=DEF_GUILD)
+async def search(interaction: Interaction, q: str): # <Add provider selector>
+
+    user = interaction.user
+
+    if user.voice == None:
+        await interaction.response.send_message('You must be in a voice channel to use this command!', ephemeral=True)
+        return
+
+    if vc != None:
+        if interaction.user not in vc.channel.members and song_is_active:
+            await interaction.response.send_message('The bot is currently in use in another channel, please wait for that session to end.', ephemeral=True)
+            return
+
+    video_search = youtubesearchpython.__future__.VideosSearch(q, limit=1)
+    res = await video_search.next()
+    song_link = res['result'][0]['link']
+    song_name = res['result'][0]['title']
+
+    if queue != []:
+        await interaction.response.send_message(f'Added [{song_name}](<{song_link}>) to the queue')
+    else:
+        await interaction.response.send_message(f'Loading [{song_name}](<{song_link}>)')
+
+    queue.append({'song_name': song_name, 'song_link': song_link})
+
+    while True:
+
+        i = 0
+        for dict in queue:
+            if dict['song_link'] == song_link:
+                break
+            i += 1
+
+        if i == 0:
+            break
+        
+        await asyncio.sleep(1)
+
+    while song_is_active:
+        await asyncio.sleep(1)
+
+    await queue_handler(interaction, 'Play')
+
+@tree.command(name='queue', description='Part of the sounds pack, checks the current queue,', guild=DEF_GUILD)
+async def queue_cmd(interaction: Interaction):
+
+    if not song_is_active:
+        await interaction.response.send_message('There is no song playing!', ephemeral=True)
+        return
+
+    i = 0
+    msg = 'Next in queue:\n'
+    for song in queue:
+        msg += f"{'Playing' if i == 0 else i}: [{song['song_name']}](<{song['song_link']}>)\n"
+    await interaction.response.send_message(msg)
+
+@tree.command(name='skip', description='Part of the sounds pack, skips current song.', guild=DEF_GUILD)
+async def skip(interaction: Interaction):
+    await queue_handler(interaction, 'Skip')
+
+@tree.command(name='pause', description='Part of the sounds pack, pauses current song.', guild=DEF_GUILD)
+async def pause(interaction: Interaction):
+    await queue_handler(interaction, 'Pause')
+
+@tree.command(name='resume', description='Part of the sounds pack, resumes current song.', guild=DEF_GUILD)
+async def skip(interaction: Interaction):
+    await queue_handler(interaction, 'Resume')
+
+@tree.command(name='stop', description='Part of the sounds pack, stops playback and clears queue.', guild=DEF_GUILD)
+async def stop(interaction: Interaction):
+    await queue_handler(interaction, 'Stop')
 
 @tree.command(name='username', description='View, Edit, Delete, or Add Usernames! (to delete, type delete as username)', guild=DEF_GUILD)
 async def username(interaction: Interaction, mode: Literal['View', 'Edit', 'Add'], username: str = None, platform: str = None, user: Member | None = None):
@@ -190,9 +400,18 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
     if payload.emoji.name == '🌐':
         await MEMBER.remove_roles(DESTINY_ROLE)
 
+# @client.event
+# async def on_voice_state_update(member: Member, before: VoiceState, after: VoiceState):
+#     if member.bot:
+#         if member in before.channel.members and member not in after.channel.members:
+#             await music_status_channel.edit(name='No songs playing')
 
 @client.event
 async def on_ready():
+
+    global music_status_channel
+    music_status_channel = client.get_guild(GUILD_ID).voice_channels[0]
+    
     await client.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="for plant"))
     await tree.sync(guild=DEF_GUILD)
     print("Ready!")
