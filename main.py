@@ -1,15 +1,13 @@
 import discord, json, os, shutil, asyncio, youtubesearchpython.__future__, youtubesearchpython, handlers.currency, time
-from pytube import YouTube
+from pytube import YouTube, exceptions
 from discord import app_commands, Interaction, Member, RawReactionActionEvent, VoiceClient, VoiceState
 from typing import Literal, Union
 from dotenv import load_dotenv
 
-# Discord app_commands and client Init
 intents = discord.Intents.all()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
-# Constants, init vars, and Env
 load_dotenv()
 TOKEN = os.getenv('TOKEN')
 AUDIO_FOLDER = os.getenv('AUDIO_FOLDER')
@@ -21,11 +19,10 @@ queue = []
 vc = None
 song_is_active = False
 song_is_paused = False
+queue_stopped = False
 
-# Pre load actions
 if __name__ == '__main__':
 
-    # Credit to Nick Stinemates [https://stackoverflow.com/a/185941]
     for filename in os.listdir(AUDIO_FOLDER):
         file_path = os.path.join(AUDIO_FOLDER, filename)
         try:
@@ -40,6 +37,7 @@ async def queue_handler(interaction: discord.Interaction, action: Literal['Play'
 
     global song_is_active
     global song_is_paused
+    global queue_stopped
     global vc
 
     voice_channel = interaction.user.voice.channel
@@ -48,49 +46,60 @@ async def queue_handler(interaction: discord.Interaction, action: Literal['Play'
     song_link = queue[0]['song_link']
 
     match action:
-
+        # <CODE UGLY ASF BRO WTF HIGH ME????>
         case 'Play':
 
-            # await music_status_channel.edit(name=song_name)
-
             yt = YouTube(song_link)
-            audio = yt.streams.filter(only_audio = True).first().download(output_path='./music')
 
-            if vc == None:
-                vc = await voice_channel.connect()
+            try:
 
-            if not vc.is_connected():
-                vc = await voice_channel.connect()
+                audio_size = yt.streams.filter(only_audio = True).first().filesize_mb
 
-            ffmpeg_instance = discord.FFmpegPCMAudio(executable='C:/ffmpeg/bin/ffmpeg.exe', source=audio)
-            
-            vc.play(ffmpeg_instance)
+                if audio_size > 100:
+                    await text_channel.send(f'Failed to load {song_name} (Audio {round(audio_size - 100)}mb over size limit)')
+                    queue.pop(0)
+                    return
 
-            await text_channel.send(f'Loaded [{song_name}](<{song_link}>)')
-            song_is_active = True
-            
+                audio = yt.streams.filter(only_audio = True).first().download(output_path='./music')
 
-            while song_is_active and vc.is_playing() or song_is_paused:
-                await asyncio.sleep(1)
+                if vc == None:
+                    vc = await voice_channel.connect()
 
-            vc.stop()
-            queue.pop(0)
-            
-            ffmpeg_instance.cleanup()
+                if not vc.is_connected():
+                    vc = await voice_channel.connect()
 
-            while True:
-                try:
-                    os.remove(audio)
-                    break
-                except:
+                ffmpeg_instance = discord.FFmpegPCMAudio(executable='C:/ffmpeg/bin/ffmpeg.exe', source=audio)
+                
+                vc.play(ffmpeg_instance)
+
+                await text_channel.send(f'Loaded [{song_name}](<{song_link}>)')
+                song_is_active = True
+                
+
+                while song_is_active and vc.is_playing() or song_is_paused:
                     await asyncio.sleep(1)
 
-            if queue == []:
-                await vc.disconnect()
-                vc = None
-                # await music_status_channel.edit(name='No songs playing')
+                vc.stop()
+                queue.pop(0)
                 
-            song_is_active = False
+                ffmpeg_instance.cleanup()
+
+                while True:
+                    try:
+                        os.remove(audio)
+                        break
+                    except:
+                        await asyncio.sleep(1)
+
+                if queue == []:
+                    await vc.disconnect()
+                    vc = None
+                    
+                song_is_active = False
+
+            except exceptions.AgeRestrictedError:
+                queue.pop(0)
+                await text_channel.send(f'Failed to load {song_name} (Age Restricted)')
 
             
         case 'Pause':
@@ -151,11 +160,25 @@ async def queue_handler(interaction: discord.Interaction, action: Literal['Play'
             queue = []
             song_is_paused = False
             song_is_active = False
+            queue_stopped = True
+
+            await vc.disconnect()
 
             await interaction.response.send_message(f'Stopped playback and cleared queue!')
 
 @tree.command(name='play', description='Part of the sounds pack, searches for music on YouTube.', guild=DEF_GUILD)
-async def search(interaction: Interaction, q: str) -> None: # <Add provider selector>
+async def search(interaction: Interaction, q: str) -> None:
+
+    global queue_stopped
+
+    BLACKLIST = interaction.guild.get_role(1198842714683355246)
+
+    if BLACKLIST in interaction.user.roles:
+        await interaction.response.send_message('You are blacklisted from this function.', ephemeral=True)
+        return
+
+    if queue_stopped:
+        queue_stopped = False
 
     user = interaction.user
 
@@ -196,14 +219,20 @@ async def search(interaction: Interaction, q: str) -> None: # <Add provider sele
     while song_is_active:
         await asyncio.sleep(1)
 
+    if queue_stopped:
+        return
+
     await queue_handler(interaction, 'Play')
 
 @tree.command(name='queue', description='Part of the sounds pack, checks the current queue,', guild=DEF_GUILD)
 async def queue_cmd(interaction: Interaction) -> None:
-
-    if not song_is_active:
-        await interaction.response.send_message('There is no song playing!', ephemeral=True)
-        return
+    try:
+        if not song_is_active and not vc.is_playing():
+            await interaction.response.send_message('There is no song playing!', ephemeral=True)
+            return
+    except:
+            await interaction.response.send_message('There is no song playing!', ephemeral=True)
+            return
 
     i = 0
     msg = 'Next in queue:\n'
@@ -215,122 +244,115 @@ async def queue_cmd(interaction: Interaction) -> None:
 
 @tree.command(name='skip', description='Part of the sounds pack, skips current song.', guild=DEF_GUILD)
 async def skip(interaction: Interaction) -> None:
+    BLACKLIST = interaction.guild.get_role(1198842714683355246)
+
+    if BLACKLIST in interaction.user.roles:
+        await interaction.response.send_message('You are blacklisted from this function.', ephemeral=True)
+        return
+    
     await queue_handler(interaction, 'Skip')
 
 @tree.command(name='pause', description='Part of the sounds pack, pauses current song.', guild=DEF_GUILD)
 async def pause(interaction: Interaction) -> None:
+    BLACKLIST = interaction.guild.get_role(1198842714683355246)
+
+    if BLACKLIST in interaction.user.roles:
+        await interaction.response.send_message('You are blacklisted from this function.', ephemeral=True)
+        return
+    
     await queue_handler(interaction, 'Pause')
 
 @tree.command(name='resume', description='Part of the sounds pack, resumes current song.', guild=DEF_GUILD)
 async def skip(interaction: Interaction) -> None:
+    BLACKLIST = interaction.guild.get_role(1198842714683355246)
+
+    if BLACKLIST in interaction.user.roles:
+        await interaction.response.send_message('You are blacklisted from this function.', ephemeral=True)
+        return
+    
     await queue_handler(interaction, 'Resume')
 
 @tree.command(name='stop', description='Part of the sounds pack, stops playback and clears queue.', guild=DEF_GUILD)
 async def stop(interaction: Interaction) -> None:
+    BLACKLIST = interaction.guild.get_role(1198842714683355246)
+
+    if BLACKLIST in interaction.user.roles:
+        await interaction.response.send_message('You are blacklisted from this function.', ephemeral=True)
+        return
+    
     await queue_handler(interaction, 'Stop')
 
 @tree.command(name='username', description='View, Edit, Delete, or Add Usernames! (to delete, type delete as username)', guild=DEF_GUILD)
 async def username(interaction: Interaction, mode: Literal['View', 'Edit', 'Add'], username: str = None, platform: str = None, user: Member | None = None) -> None:
-    """/username command
 
-    Args:
-        interaction (Interaction): discord.Interaction
-        mode (Literal['View', 'Edit', 'Add']): mode selector.
-        username (str, optional): username input. Defaults to None.
-        platform (str, optional): platform input. Defaults to None.
-        user (Member | None, optional): discord.Member input. Defaults to None.
-    """
-
-    # Capitalize platform if given
     platform = platform.capitalize() if platform else None
 
-    # Load JSON as Dict Constant
     with open(f'{DB_FOLDER}usernames.json', 'r') as R:
         USERNAME_DATA = json.load(R)
         R.close()
 
-    # Mode selector
     match mode:
 
-        # View mode
         case 'View':
-            # Set user to the request's user if user not given
             if not user:
                 user = interaction.user
 
-            # User db check
             if str(user.id) not in USERNAME_DATA:
                 await interaction.response.send_message(f'{user.display_name} has no usernames', ephemeral=True)
                 return
             
-            # Platform view variant (single username)
             if platform:
 
-                # Platform db check
                 if platform not in USERNAME_DATA[str(user.id)]:
                     await interaction.response.send_message(f'No username for {user.display_name} on {platform}', ephemeral=True)
                     return
                 await interaction.response.send_message(f"{user.display_name}'s username for {platform} is {USERNAME_DATA[str(user.id)][platform]}")
                 return
 
-            # Default interation if platform not given (multi-username)
             msg = f'Usernames for {user.display_name}:\n'
             for platf, usern in USERNAME_DATA[str(user.id)].items():
                 msg += f'{platf}: {usern}\n'
             await interaction.response.send_message(msg)
             
-        # Edit mode
         case 'Edit':
-            # Username + platform var check (str | None)
             if not username or not platform:
                 await interaction.response.send_message("Username and/or Platform was not supplied.", ephemeral=True)
                 return
             
-            # Username db check
             if str(interaction.user.id) not in USERNAME_DATA:
                 await interaction.response.send_message("You do not have any usernames in the db!", ephemeral=True)
                 return
             
-            # Platform db check
             if platform not in USERNAME_DATA[str(interaction.user.id)]:
                 await interaction.response.send_message(f'Platform ({platform}) not found in your database, make sure it was added before!', ephemeral=True)
                 return
             
-            # Delete mode
             if username.lower() == 'delete':
                 del USERNAME_DATA[str(interaction.user.id)][platform]
                 await interaction.response.send_message(f'Deleted username on {platform}!')
             
-            # Edit db
             else:
                 USERNAME_DATA[str(interaction.user.id)][platform] = username
                 await interaction.response.send_message(f'Edited username on {platform} to {username}!')
             
-            # Convert Dict to JSON and save to db
             with open(f'{DB_FOLDER}usernames.json', 'w') as W:
                 json.dump(USERNAME_DATA, W, indent=3)
                 W.close()
 
-        # Add mode
         case 'Add':
-            # Username + platform check
             if not username or not platform:
                 await interaction.response.send_message("Username and/or Platform was not supplied.", ephemeral=True)
                 return
             
-            # Username db check + init
             if str(interaction.user.id) not in USERNAME_DATA:
                 USERNAME_DATA[str(interaction.user.id)] = {}
             
-            # Add username to Dict
             USERNAME_DATA[str(interaction.user.id)][platform] = username
 
-            # Convert Dict to JSON and save to db
             with open(f'{DB_FOLDER}usernames.json', 'w') as w:
                 json.dump(USERNAME_DATA, w, indent=3)
                 w.close()
 
-            # Response if all goes correct
             await interaction.response.send_message(f"Added the username \"{username}\" to {platform}.")
 
 @tree.command(name='reset_self_roles', description="resets the self roles handler", guild=DEF_GUILD)
@@ -342,10 +364,11 @@ async def reset_self_roles(interaction: Interaction) -> None:
 
     MESSAGE = await interaction.channel.fetch_message(1193785577724727338)
 
-    await MESSAGE.edit(content="React with the corrosponding emoji to get the role.\n\n🧊 - Siege Ping\n🪳 - Lethal Company Ping\n🌐 - Destiny 2 Ping")
+    await MESSAGE.edit(content="React with the corrosponding emoji to get the role.\n\n🧊 - Siege Ping\n🪳 - Lethal Company Ping\n🌐 - Destiny 2 Ping\n🐱 - Palworld Ping")
     await MESSAGE.add_reaction("🧊")
     await MESSAGE.add_reaction("🪳")
     await MESSAGE.add_reaction("🌐")
+    await MESSAGE.add_reaction("🐱")
 
     await interaction.response.send_message("Reset was successful!", ephemeral=True)
 
@@ -418,6 +441,115 @@ async def daily(interaction: Interaction):
 
     await interaction.response.send_message(f'You opened a {rarity} daily box and got {amount} coins!')
 
+@tree.command(name='weekly', description='Part of the economy pack, gets your weekly coins!', guild=DEF_GUILD)
+async def daily(interaction: Interaction):
+    currency_data = handlers.currency.get_currency_data()
+    drop_data = handlers.currency.get_drop_data()
+
+    if str(interaction.user.id) not in drop_data:
+        handlers.currency.add_user_to_drop_data(str(interaction.user.id))
+        drop_data = handlers.currency.get_drop_data()
+
+    if str(interaction.user.id) not in currency_data:
+        handlers.currency.add_user_to_currency_data(str(interaction.user.id))
+        currency_data = handlers.currency.get_currency_data()
+
+    now = time.time()
+    then = drop_data[str(interaction.user.id)]['weekly']
+
+    if now - then < (86400 * 7):
+        await interaction.response.send_message(f'You will get another weekly box <t:{round(then) + (86400 * 7)}:R>')
+        return
+    
+    drop = handlers.currency.calculate_drop('Weekly')
+    
+    amount = drop['amount']
+    rarity = drop['rarity']
+
+    currency_data[str(interaction.user.id)] += amount
+    drop_data[str(interaction.user.id)]['weekly'] = now
+
+    handlers.currency.save_currency_data(currency_data)
+    handlers.currency.save_drop_data(drop_data)
+
+    await interaction.response.send_message(f'You opened a {rarity} weekly box and got {amount} coins!')
+
+@tree.command(name='monthly', description='Part of the economy pack, gets your monthly coins!', guild=DEF_GUILD)
+async def daily(interaction: Interaction):
+    currency_data = handlers.currency.get_currency_data()
+    drop_data = handlers.currency.get_drop_data()
+
+    if str(interaction.user.id) not in drop_data:
+        handlers.currency.add_user_to_drop_data(str(interaction.user.id))
+        drop_data = handlers.currency.get_drop_data()
+
+    if str(interaction.user.id) not in currency_data:
+        handlers.currency.add_user_to_currency_data(str(interaction.user.id))
+        currency_data = handlers.currency.get_currency_data()
+
+    now = time.time()
+    then = drop_data[str(interaction.user.id)]['monthly']
+
+    if now - then < (86400 * 28):
+        await interaction.response.send_message(f'You will get another monthly box <t:{round(then) + (86400 * 28)}:R>')
+        return
+    
+    drop = handlers.currency.calculate_drop('Monthly')
+    
+    amount = drop['amount']
+    rarity = drop['rarity']
+
+    currency_data[str(interaction.user.id)] += amount
+    drop_data[str(interaction.user.id)]['monthly'] = now
+
+    handlers.currency.save_currency_data(currency_data)
+    handlers.currency.save_drop_data(drop_data)
+
+    await interaction.response.send_message(f'You opened a {rarity} monthly box and got {amount} coins!')
+
+@tree.command(name='leaderboard', description='Part of the economy pack, gets the top users\' coin balances', guild=DEF_GUILD)
+async def leaderboard(interaction: Interaction):
+    currency_data: dict = handlers.currency.get_currency_data()
+    sorted_currency_data = sorted(currency_data.items(), key=lambda x: int(x[1]), reverse=True)
+    coins = sorted_currency_data[i][1]
+
+    msg = 'Leaderboard:'
+    for i in range(10) if len(currency_data) > 10 else range(len(currency_data)):
+        user = interaction.guild.get_member(int(sorted_currency_data[i][0]))
+        msg += f'\n- {user.display_name}: {coins} coin{'s' if coins != 1 else ''}'
+
+    await interaction.response.send_message(msg)
+
+@tree.command(name='gamble', description='Part of the economy pack, gambles \'n\' coins.', guild=DEF_GUILD)
+async def gamble(interaction: Interaction, amount: int):
+    winnings = handlers.currency.calculate_gamble(amount)
+
+    currency_data = handlers.currency.get_currency_data()
+    gambling_data = handlers.currency.get_gambling_data()
+
+    if str(interaction.user.id) not in currency_data:
+        handlers.currency.add_user_to_currency_data(str(interaction.user.id))
+        currency_data = handlers.currency.get_currency_data()
+
+    if str(interaction.user.id) not in gambling_data:
+        handlers.currency.add_user_to_gambling_data(str(interaction.user.id))
+        gambling_data = handlers.currency.get_gambling_data()
+
+    currency_data[str(interaction.user.id)] += winnings - amount
+    handlers.currency.save_currency_data(currency_data)
+
+    gambling_data[str(interaction.user.id)]['coins'] += winnings - amount
+
+    if winnings == 0:
+        gambling_data[str(interaction.user.id)]['losses'] += 1
+    else:
+        gambling_data[str(interaction.user.id)]['wins'] += 1
+
+    handlers.currency.save_gambling_data(gambling_data)
+
+    await interaction.response.send_message(f'You {f'won {winnings} coin{'s' if winnings != 1 else ''}' if winnings != 0 else f'lost {amount} coin{'s' if amount != 1 else ''}'}')
+
+
 @client.event
 async def on_member_join(member: Member):
     normie_role = member.guild.get_role(1193769091396288514)
@@ -430,6 +562,7 @@ async def on_raw_reaction_add(payload: RawReactionActionEvent):
     SIEGE_ROLE = payload.member.guild.get_role(1193768641079021588)
     LETHAL_ROLE = payload.member.guild.get_role(1193770900881940570)
     DESTINY_ROLE = payload.member.guild.get_role(1193770955516940398)
+    PALWORLD_ROLE = payload.member.guild.get_role(1200753458555396147)
 
     if payload.channel_id != 1193770729175519363:
         return
@@ -442,6 +575,9 @@ async def on_raw_reaction_add(payload: RawReactionActionEvent):
 
     if payload.emoji.name == '🌐':
         await payload.member.add_roles(DESTINY_ROLE)
+    
+    if payload.emoji.name == '🐱':
+        await payload.member.add_roles(PALWORLD_ROLE)
 
 @client.event
 async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
@@ -452,6 +588,7 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
     SIEGE_ROLE = GUILD.get_role(1193768641079021588)
     LETHAL_ROLE = GUILD.get_role(1193770900881940570)
     DESTINY_ROLE = GUILD.get_role(1193770955516940398)
+    PALWORLD_ROLE = GUILD.get_role(1200753458555396147)
 
     if payload.channel_id != 1193770729175519363:
         return
@@ -465,18 +602,13 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
     if payload.emoji.name == '🌐':
         await MEMBER.remove_roles(DESTINY_ROLE)
 
-# @client.event
-# async def on_voice_state_update(member: Member, before: VoiceState, after: VoiceState):
-#     if member.bot:
-#         if member in before.channel.members and member not in after.channel.members:
-#             await music_status_channel.edit(name='No songs playing')
+    if payload.emoji.name == '🐱':
+        await payload.member.add_roles(PALWORLD_ROLE)
+
 
 @client.event
 async def on_ready():
 
-    # <Disabled due to rate limit>
-    # global music_status_channel
-    # music_status_channel = client.get_guild(GUILD_ID).voice_channels[0]
     
     await client.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="for plant"))
     await tree.sync(guild=DEF_GUILD)
